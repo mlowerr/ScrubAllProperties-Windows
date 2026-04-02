@@ -13,7 +13,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not $IsWindows) {
+# `$IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
+$runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+    [bool]$IsWindows
+} else {
+    $env:OS -eq 'Windows_NT'
+}
+
+if (-not $runningOnWindows) {
     throw 'This script only supports Microsoft Windows.'
 }
 
@@ -21,7 +28,8 @@ if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
     throw "Path is not a valid directory: $Path"
 }
 
-Add-Type -Language CSharp -TypeDefinition @"
+if (-not ('PropertyScrubber.PropertyHelpers' -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -143,6 +151,7 @@ namespace PropertyScrubber {
     }
 }
 "@
+}
 
 function Get-ScrubbedFileName {
     param(
