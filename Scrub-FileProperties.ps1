@@ -13,6 +13,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$mediaExtensions = @(
+    '.jpg', '.jpeg', '.jpe', '.jfif', '.heic', '.heif', '.png', '.tif', '.tiff', '.webp',
+    '.mp4', '.m4v', '.mov', '.avi', '.mkv', '.wmv'
+)
+
+$sensitiveShellProperties = @(
+    'Title', 'Subject', 'Rating', 'Tags', 'Comments', 'Authors', 'Company', 'Manager',
+    'Category', 'Keywords', 'Copyright', 'Camera model', 'Camera maker', 'Date taken',
+    'Latitude', 'Longitude', 'People', 'Owner', 'Contributing artists'
+)
+
 # `$IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
 $runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
     [bool]$IsWindows
@@ -153,6 +164,9 @@ namespace PropertyScrubber {
 "@
 }
 
+$script:ExifToolCommand = $null
+$script:ShellApplication = $null
+
 function Get-ScrubbedFileName {
     param(
         [Parameter(Mandatory)]
@@ -174,6 +188,203 @@ function Get-ScrubbedFileName {
     return $candidate
 }
 
+function Test-IsMediaFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($FilePath)
+    return $mediaExtensions -contains $extension.ToLowerInvariant()
+}
+
+function Get-ExifToolCommand {
+    if ($script:ExifToolCommand) {
+        return $script:ExifToolCommand
+    }
+
+    foreach ($candidate in @('exiftool', 'exiftool.exe')) {
+        $command = Get-Command -Name $candidate -ErrorAction SilentlyContinue
+        if ($command) {
+            $script:ExifToolCommand = $command.Source
+            return $script:ExifToolCommand
+        }
+    }
+
+    return $null
+}
+
+function Get-ShellPropertyIndexMap {
+    param(
+        [Parameter(Mandatory)]
+        [System.__ComObject]$Folder
+    )
+
+    $map = @{}
+    for ($i = 0; $i -lt 500; $i++) {
+        $name = $Folder.GetDetailsOf($null, $i)
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $trimmed = $name.Trim()
+            if (-not $map.ContainsKey($trimmed)) {
+                $map[$trimmed] = $i
+            }
+        }
+    }
+
+    return $map
+}
+
+function Get-SensitiveShellProperties {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    if (-not $script:ShellApplication) {
+        $script:ShellApplication = New-Object -ComObject Shell.Application
+    }
+
+    $folderPath = Split-Path -Path $FilePath -Parent
+    $fileName = Split-Path -Path $FilePath -Leaf
+    $folder = $script:ShellApplication.Namespace($folderPath)
+    if (-not $folder) {
+        return @{}
+    }
+
+    $item = $folder.ParseName($fileName)
+    if (-not $item) {
+        return @{}
+    }
+
+    $indexMap = Get-ShellPropertyIndexMap -Folder $folder
+
+    $result = @{}
+    foreach ($propertyName in $sensitiveShellProperties) {
+        if (-not $indexMap.ContainsKey($propertyName)) {
+            continue
+        }
+
+        $value = $folder.GetDetailsOf($item, [int]$indexMap[$propertyName])
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+
+        $result[$propertyName] = $value.Trim()
+    }
+
+    return $result
+}
+
+function Invoke-MediaMetadataScrub {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $tool = Get-ExifToolCommand
+    if (-not $tool) {
+        return [pscustomobject]@{
+            Attempted = $false
+            Succeeded = $false
+            Status    = 'Skipped'
+            Message   = 'ExifTool is not installed; media-container metadata scrub was skipped.'
+        }
+    }
+
+    $arguments = @(
+        '-overwrite_original',
+        '-all=',
+        '-P',
+        '-m',
+        '-q',
+        '-q',
+        $FilePath
+    )
+
+    $stdout = $null
+    $stderr = $null
+    $exitCode = 0
+
+    try {
+        $stdout = & $tool @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $false
+            Status    = 'Failed'
+            Message   = "ExifTool invocation failed: $($_.Exception.Message)"
+        }
+    }
+
+    if ($exitCode -eq 0) {
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $true
+            Status    = 'Succeeded'
+            Message   = 'Embedded media metadata removed with ExifTool.'
+        }
+    }
+
+    $combinedOutput = if ($stdout) { ($stdout | Out-String).Trim() } else { 'No output.' }
+    return [pscustomobject]@{
+        Attempted = $true
+        Succeeded = $false
+        Status    = 'Failed'
+        Message   = "ExifTool failed with exit code $exitCode. $combinedOutput"
+    }
+}
+
+function Invoke-PropertyStoreScrub {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    try {
+        $hr = [PropertyScrubber.PropertyHelpers]::ClearWritableProperties($FilePath)
+        if ($hr -eq 0) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Succeeded = $true
+                Status    = 'Succeeded'
+                Message   = 'Windows writable property store values were cleared.'
+            }
+        }
+
+        $hex = ('0x{0:X8}' -f $hr)
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $false
+            Status    = 'Failed'
+            Message   = "Property store commit returned HRESULT $hex."
+        }
+    }
+    catch {
+        $message = $_.Exception.Message
+        $isUnsupportedHandler =
+            $message -match 'bitmap codec does not support the bitmap property' -or
+            $message -match '0x88982F41'
+
+        if ($isUnsupportedHandler) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Succeeded = $false
+                Status    = 'Unsupported'
+                Message   = 'Property store handler does not support writable bitmap properties for this format.'
+            }
+        }
+
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $false
+            Status    = 'Failed'
+            Message   = "Property store scrub failed: $message"
+        }
+    }
+}
+
 $enumerationOptions = @{
     LiteralPath = $Path
     File        = $true
@@ -190,7 +401,22 @@ if (-not $files) {
     return
 }
 
+$results = New-Object System.Collections.Generic.List[object]
+
 foreach ($file in $files) {
+    $fileResult = [ordered]@{
+        SourceFile            = $file.FullName
+        OutputFile            = $null
+        Copied                = $false
+        IsMedia               = Test-IsMediaFile -FilePath $file.FullName
+        MediaMetadataRemoved  = $false
+        PropertyStoreCleared  = $false
+        PropertyStoreStatus   = 'NotAttempted'
+        VerificationStatus    = 'NotChecked'
+        ResidualFields        = @()
+        Warnings              = New-Object System.Collections.Generic.List[string]
+    }
+
     try {
         $destination = if ($Force) {
             Join-Path $file.DirectoryName ("{0}_scrubbed{1}" -f $file.BaseName, $file.Extension)
@@ -199,17 +425,92 @@ foreach ($file in $files) {
         }
 
         Copy-Item -LiteralPath $file.FullName -Destination $destination -Force:$Force
+        $fileResult.OutputFile = $destination
+        $fileResult.Copied = $true
 
-        $hr = [PropertyScrubber.PropertyHelpers]::ClearWritableProperties($destination)
-        if ($hr -ne 0) {
-            $hex = ('0x{0:X8}' -f $hr)
-            Write-Warning "Copied '$($file.FullName)' to '$destination', but metadata scrub returned HRESULT $hex."
-            continue
+        if ($fileResult.IsMedia) {
+            $mediaScrub = Invoke-MediaMetadataScrub -FilePath $destination
+            if ($mediaScrub.Succeeded) {
+                $fileResult.MediaMetadataRemoved = $true
+            }
+            else {
+                $fileResult.Warnings.Add($mediaScrub.Message)
+            }
         }
 
-        Write-Host "Scrubbed copy created: $destination"
+        $propertyScrub = Invoke-PropertyStoreScrub -FilePath $destination
+        $fileResult.PropertyStoreStatus = $propertyScrub.Status
+        if ($propertyScrub.Succeeded) {
+            $fileResult.PropertyStoreCleared = $true
+        }
+        elseif ($propertyScrub.Status -eq 'Unsupported') {
+            if (-not $fileResult.MediaMetadataRemoved) {
+                $fileResult.Warnings.Add($propertyScrub.Message)
+            }
+        }
+        else {
+            $fileResult.Warnings.Add($propertyScrub.Message)
+        }
+
+        $residualProperties = Get-SensitiveShellProperties -FilePath $destination
+        if ($residualProperties.Count -eq 0) {
+            $fileResult.VerificationStatus = 'VerifiedClean'
+        }
+        else {
+            $fileResult.VerificationStatus = 'ResidualFieldsFound'
+            $fileResult.ResidualFields = @($residualProperties.Keys | Sort-Object)
+            $fileResult.Warnings.Add(('Residual sensitive properties found: {0}' -f ($fileResult.ResidualFields -join ', ')))
+        }
+
+        $isFullSuccess =
+            ($fileResult.IsMedia -and $fileResult.MediaMetadataRemoved -and ($fileResult.PropertyStoreCleared -or $fileResult.PropertyStoreStatus -eq 'Unsupported') -and $fileResult.VerificationStatus -eq 'VerifiedClean') -or
+            ((-not $fileResult.IsMedia) -and $fileResult.PropertyStoreCleared -and $fileResult.VerificationStatus -eq 'VerifiedClean')
+
+        if ($isFullSuccess) {
+            Write-Host "Scrubbed copy created: $destination"
+        }
+        else {
+            Write-Warning "Scrub completed with warnings for '$($file.FullName)'. See summary output for details."
+        }
     }
     catch {
+        $fileResult.Warnings.Add($_.Exception.Message)
         Write-Warning "Failed to process '$($file.FullName)': $($_.Exception.Message)"
     }
+
+    $results.Add([pscustomobject]$fileResult)
 }
+
+Write-Host ''
+Write-Host 'Scrub summary:'
+$fullSuccess = 0
+$partial = 0
+$failed = 0
+
+foreach ($result in $results) {
+    $failedCopy = -not $result.Copied
+    $hasWarnings = $result.Warnings.Count -gt 0
+
+    if ($failedCopy) {
+        $failed++
+        continue
+    }
+
+    if (-not $hasWarnings) {
+        $fullSuccess++
+    }
+    else {
+        $partial++
+    }
+}
+
+Write-Host ("  Full success : {0}" -f $fullSuccess)
+Write-Host ("  Partial      : {0}" -f $partial)
+Write-Host ("  Failed       : {0}" -f $failed)
+Write-Host ''
+
+$results |
+    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus,
+        @{ Name = 'ResidualFields'; Expression = { $_.ResidualFields -join '; ' } },
+        @{ Name = 'Warnings'; Expression = { $_.Warnings -join ' | ' } } |
+    Format-Table -AutoSize
