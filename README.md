@@ -1,3 +1,5 @@
+NOTE: This appears to work, in limited testing performed, but also appears to be overly an overly complex solution to wrap ExifTool.  (The joys of vibe coding and not testing between steps.)  At some point, I will look at this closer, but right now it solves for the use case I was looking to address, although it took much more time than I wanted to invest into this...
+
 # ScrubAllProperties-Windows
 
 `Scrub-FileProperties.ps1` creates a copy of each file and attempts to remove all writable Windows file properties (metadata), similar to **File Explorer → Properties → Details → Remove Properties and Personal Information → Create a copy with all possible properties removed**.
