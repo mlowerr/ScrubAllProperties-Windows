@@ -258,7 +258,6 @@ function Get-SensitivePropertyKeyDefinitions {
         [pscustomobject]@{ Name = 'System.Rating'; Fmtid = '9a9bc088-4f6d-469e-9919-e705412040f9'; Pid = 9 },
         [pscustomobject]@{ Name = 'System.Category'; Fmtid = 'd5cdd502-2e9c-101b-9397-08002b2cf9ae'; Pid = 2 },
         [pscustomobject]@{ Name = 'System.Copyright'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 11 },
-        [pscustomobject]@{ Name = 'System.Owner'; Fmtid = '9b174b34-40ff-11d2-a27e-00c04fc30871'; Pid = 4 },
         [pscustomobject]@{ Name = 'System.People'; Fmtid = 'e8309b6e-084c-49b4-b1fc-90a80331b638'; Pid = 100 },
         [pscustomobject]@{ Name = 'System.Music.Artist'; Fmtid = '56a3372e-ce9c-11d2-9f0e-006097c686f6'; Pid = 2 },
         [pscustomobject]@{ Name = 'System.Media.Publisher'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 30 },
