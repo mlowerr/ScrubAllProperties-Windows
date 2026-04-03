@@ -439,16 +439,30 @@ function Test-ExcludedExifToolVerificationTag {
         [string]$TagName
     )
 
-    # Exclude file-system/bookkeeping fields and structural/derived container tags that
-    # may legitimately persist after `-all=` and are not user-authored metadata.
+    # Exclude file-system/bookkeeping fields and explicitly enumerated structural/stat tags
+    # that may legitimately persist after `-all=` and are not user-authored metadata.
     $excludedPrefixes = @(
         'File:',
         'ExifTool:',
-        'Composite:',
-        'JFIF:',
-        'QuickTime:',
-        'PNG:',
-        'RIFF:'
+        'Composite:'
+    )
+
+    $excludedTags = @(
+        # Container/file-structure descriptors (not descriptive/user-authored metadata).
+        'JFIFVersion',
+        'MajorBrand',
+        'MinorVersion',
+        'CompatibleBrands',
+        'HandlerType',
+        'PrimaryItemReference',
+        'ImageWidth',
+        'ImageHeight',
+        'BitDepth',
+        'ColorType',
+        'Compression',
+        'Filter',
+        'Interlace',
+        'Encoding'
     )
 
     if ($TagName -eq 'SourceFile') {
@@ -457,6 +471,12 @@ function Test-ExcludedExifToolVerificationTag {
 
     foreach ($prefix in $excludedPrefixes) {
         if ($TagName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    foreach ($excludedTag in $excludedTags) {
+        if ($TagName.Equals($excludedTag, [System.StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }
