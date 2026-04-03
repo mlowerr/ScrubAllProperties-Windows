@@ -336,6 +336,118 @@ function Invoke-MediaMetadataScrub {
     }
 }
 
+function Test-ExcludedExifToolVerificationTag {
+    param(
+        [Parameter(Mandatory)]
+        [string]$TagName
+    )
+
+    # Exclude file-system and ExifTool bookkeeping fields from residual metadata checks.
+    return $TagName -eq 'SourceFile' -or $TagName.StartsWith('File:') -or $TagName.StartsWith('ExifTool:')
+}
+
+function Invoke-ExifToolMetadataVerification {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $tool = Get-ExifToolCommand
+    if (-not $tool) {
+        return [pscustomobject]@{
+            Attempted      = $false
+            Succeeded      = $false
+            Status         = 'Failed'
+            ResidualFields = @()
+            Message        = 'ExifTool is required for media metadata verification but was not found.'
+        }
+    }
+
+    $arguments = @(
+        '-j',
+        '-a',
+        '-G1',
+        '-s',
+        '-sort',
+        $FilePath
+    )
+
+    try {
+        $raw = & $tool @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $false
+            Status         = 'Failed'
+            ResidualFields = @()
+            Message        = "ExifTool verification failed: $($_.Exception.Message)"
+        }
+    }
+
+    if ($exitCode -ne 0) {
+        $output = if ($raw) { ($raw | Out-String).Trim() } else { 'No output.' }
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $false
+            Status         = 'Failed'
+            ResidualFields = @()
+            Message        = "ExifTool verification returned exit code $exitCode. $output"
+        }
+    }
+
+    try {
+        $records = $raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $false
+            Status         = 'Failed'
+            ResidualFields = @()
+            Message        = "ExifTool verification output was not valid JSON: $($_.Exception.Message)"
+        }
+    }
+
+    $record = @($records)[0]
+    if (-not $record) {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $true
+            Status         = 'VerifiedClean'
+            ResidualFields = @()
+            Message        = 'No ExifTool metadata records were returned.'
+        }
+    }
+
+    $residual = New-Object System.Collections.Generic.List[string]
+    foreach ($property in $record.PSObject.Properties) {
+        if (-not (Test-ExcludedExifToolVerificationTag -TagName $property.Name)) {
+            $residual.Add($property.Name)
+        }
+    }
+
+    $residualFields = @($residual | Sort-Object -Unique)
+    if ($residualFields.Count -eq 0) {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $true
+            Status         = 'VerifiedClean'
+            ResidualFields = @()
+            Message        = 'No residual metadata tags detected by ExifTool (excluding file-system/stat fields).'
+        }
+    }
+
+    return [pscustomobject]@{
+        Attempted      = $true
+        Succeeded      = $false
+        Status         = 'ResidualFieldsFound'
+        ResidualFields = $residualFields
+        Message        = ('Residual metadata tags detected by ExifTool: {0}' -f ($residualFields -join ', '))
+    }
+}
+
 function Invoke-PropertyStoreScrub {
     param(
         [Parameter(Mandatory)]
@@ -484,14 +596,25 @@ foreach ($file in $files) {
             $fileResult.Warnings.Add($propertyScrub.Message)
         }
 
-        $residualProperties = Get-SensitiveShellProperties -FilePath $destination
-        if ($residualProperties.Count -eq 0) {
-            $fileResult.VerificationStatus = 'VerifiedClean'
+        if ($fileResult.IsMedia) {
+            $mediaVerification = Invoke-ExifToolMetadataVerification -FilePath $destination
+            $fileResult.VerificationStatus = $mediaVerification.Status
+            if (-not $mediaVerification.Succeeded) {
+                $fileResult.ResidualFields = @($mediaVerification.ResidualFields)
+                $fileResult.Warnings.Add($mediaVerification.Message)
+            }
         }
         else {
-            $fileResult.VerificationStatus = 'ResidualFieldsFound'
-            $fileResult.ResidualFields = @($residualProperties.Keys | Sort-Object)
-            $fileResult.Warnings.Add(('Residual sensitive properties found: {0}' -f ($fileResult.ResidualFields -join ', ')))
+            # Shell-property verification remains a secondary/fallback check for non-media files.
+            $residualProperties = Get-SensitiveShellProperties -FilePath $destination
+            if ($residualProperties.Count -eq 0) {
+                $fileResult.VerificationStatus = 'VerifiedClean'
+            }
+            else {
+                $fileResult.VerificationStatus = 'ResidualFieldsFound'
+                $fileResult.ResidualFields = @($residualProperties.Keys | Sort-Object)
+                $fileResult.Warnings.Add(('Residual sensitive properties found: {0}' -f ($fileResult.ResidualFields -join ', ')))
+            }
         }
 
         $isFullSuccess =
