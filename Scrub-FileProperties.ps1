@@ -286,8 +286,8 @@ function Invoke-MediaMetadataScrub {
         return [pscustomobject]@{
             Attempted = $false
             Succeeded = $false
-            Status    = 'Skipped'
-            Message   = 'ExifTool is not installed; media-container metadata scrub was skipped.'
+            Status    = 'Failed'
+            Message   = 'ExifTool is required for media metadata scrubbing but was not found.'
         }
     }
 
@@ -399,6 +399,11 @@ $files = Get-ChildItem @enumerationOptions
 if (-not $files) {
     Write-Host 'No files matched the provided criteria.'
     return
+}
+
+$matchedMediaFiles = @($files | Where-Object { Test-IsMediaFile -FilePath $_.FullName })
+if ($matchedMediaFiles.Count -gt 0 -and -not (Get-ExifToolCommand)) {
+    throw ('ExifTool is required to scrub metadata from matched media files. Install ExifTool and retry. First media file: {0}' -f $matchedMediaFiles[0].FullName)
 }
 
 $results = New-Object System.Collections.Generic.List[object]
