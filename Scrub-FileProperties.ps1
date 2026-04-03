@@ -18,12 +18,6 @@ $mediaExtensions = @(
     '.mp4', '.m4v', '.mov', '.avi', '.mkv', '.wmv'
 )
 
-$sensitiveShellProperties = @(
-    'Title', 'Subject', 'Rating', 'Tags', 'Comments', 'Authors', 'Company', 'Manager',
-    'Category', 'Keywords', 'Copyright', 'Camera model', 'Camera maker', 'Date taken',
-    'Latitude', 'Longitude', 'People', 'Owner', 'Contributing artists'
-)
-
 # `$IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
 $runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
     [bool]$IsWindows
@@ -110,6 +104,7 @@ namespace PropertyScrubber {
 
     public static class PropertyHelpers {
         private const ushort VT_EMPTY = 0;
+        private const ushort VT_NULL = 1;
 
         public static uint ClearWritableProperties(string path) {
             Guid iid = NativeMethods.IID_IPropertyStore;
@@ -159,13 +154,50 @@ namespace PropertyScrubber {
             Marshal.ReleaseComObject(store);
             return hr;
         }
+
+        public static uint HasPropertyValue(string path, Guid fmtid, uint pid, out bool hasValue) {
+            hasValue = false;
+
+            Guid iid = NativeMethods.IID_IPropertyStore;
+            IPropertyStore store;
+            uint hr = NativeMethods.SHGetPropertyStoreFromParsingName(
+                path,
+                IntPtr.Zero,
+                GETPROPERTYSTOREFLAGS.GPS_BESTEFFORT | GETPROPERTYSTOREFLAGS.GPS_OPENSLOWITEM,
+                ref iid,
+                out store);
+
+            if (hr != 0) {
+                return hr;
+            }
+
+            PROPERTYKEY key = new PROPERTYKEY();
+            key.fmtid = fmtid;
+            key.pid = pid;
+
+            PROPVARIANT value;
+            hr = store.GetValue(ref key, out value);
+            Marshal.ReleaseComObject(store);
+
+            if (hr != 0) {
+                return hr;
+            }
+
+            try {
+                hasValue = value.vt != VT_EMPTY && value.vt != VT_NULL;
+            }
+            finally {
+                NativeMethods.PropVariantClear(ref value);
+            }
+
+            return 0;
+        }
     }
 }
 "@
 }
 
 $script:ExifToolCommand = $null
-$script:ShellApplication = $null
 
 function Get-ScrubbedFileName {
     param(
@@ -214,65 +246,126 @@ function Get-ExifToolCommand {
     return $null
 }
 
-function Get-ShellPropertyIndexMap {
-    param(
-        [Parameter(Mandatory)]
-        [System.__ComObject]$Folder
+function Get-SensitivePropertyKeyDefinitions {
+    return @(
+        [pscustomobject]@{ Name = 'System.Title'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 2 },
+        [pscustomobject]@{ Name = 'System.Subject'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 3 },
+        [pscustomobject]@{ Name = 'System.Author'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 4 },
+        [pscustomobject]@{ Name = 'System.Keywords'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 5 },
+        [pscustomobject]@{ Name = 'System.Comment'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 6 },
+        [pscustomobject]@{ Name = 'System.Rating'; Fmtid = '9a9bc088-4f6d-469e-9919-e705412040f9'; Pid = 9 },
+        [pscustomobject]@{ Name = 'System.Copyright'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 11 },
+        [pscustomobject]@{ Name = 'System.Photo.DateTaken'; Fmtid = '14b81da1-0135-4d31-96d9-6cbfc9671a99'; Pid = 36867 },
+        [pscustomobject]@{ Name = 'System.Photo.CameraManufacturer'; Fmtid = 'aabaf6c9-e0c5-4719-8585-57b103e584fe'; Pid = 100 },
+        [pscustomobject]@{ Name = 'System.Photo.CameraModel'; Fmtid = '656a3bb3-ecc0-43fd-8477-4ae0404a96cd'; Pid = 272 },
+        [pscustomobject]@{ Name = 'System.GPS.Latitude'; Fmtid = '8727cfff-4868-4ec6-ad5b-81b98521d1ab'; Pid = 100 },
+        [pscustomobject]@{ Name = 'System.GPS.Longitude'; Fmtid = 'c4c4dbb2-b593-466b-bbda-d03d27d5e43a'; Pid = 100 },
+        [pscustomobject]@{ Name = 'System.Media.Publisher'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 30 }
     )
-
-    $map = @{}
-    for ($i = 0; $i -lt 500; $i++) {
-        $name = $Folder.GetDetailsOf($null, $i)
-        if (-not [string]::IsNullOrWhiteSpace($name)) {
-            $trimmed = $name.Trim()
-            if (-not $map.ContainsKey($trimmed)) {
-                $map[$trimmed] = $i
-            }
-        }
-    }
-
-    return $map
 }
 
-function Get-SensitiveShellProperties {
+function Test-IsUnsupportedPropertyKeyHRESULT {
+    param(
+        [Parameter(Mandatory)]
+        [uint32]$HResult
+    )
+
+    # Common HRESULTs when a property key is unavailable through the current file's
+    # property handler. These are treated as "key unsupported", not "clean".
+    return @(
+        0x80070490, # ERROR_NOT_FOUND
+        0x80004002, # E_NOINTERFACE
+        0x80004005, # E_FAIL
+        0x80070032  # ERROR_NOT_SUPPORTED
+    ) -contains $HResult
+}
+
+function Invoke-PropertyKeyVerification {
     param(
         [Parameter(Mandatory)]
         [string]$FilePath
     )
 
-    if (-not $script:ShellApplication) {
-        $script:ShellApplication = New-Object -ComObject Shell.Application
+    $keyDefinitions = Get-SensitivePropertyKeyDefinitions
+    if (-not $keyDefinitions -or $keyDefinitions.Count -eq 0) {
+        return [pscustomobject]@{
+            Attempted      = $false
+            Succeeded      = $false
+            Status         = 'Unsupported'
+            ResidualFields = @()
+            Message        = 'Verification unsupported: no stable PKEY checks are defined.'
+        }
     }
 
-    $folderPath = Split-Path -Path $FilePath -Parent
-    $fileName = Split-Path -Path $FilePath -Leaf
-    $folder = $script:ShellApplication.Namespace($folderPath)
-    if (-not $folder) {
-        return @{}
-    }
+    $residual = New-Object System.Collections.Generic.List[string]
+    $checkedCount = 0
+    $unsupportedCount = 0
+    $errors = New-Object System.Collections.Generic.List[string]
 
-    $item = $folder.ParseName($fileName)
-    if (-not $item) {
-        return @{}
-    }
+    foreach ($key in $keyDefinitions) {
+        $hasValue = $false
+        $hr = [PropertyScrubber.PropertyHelpers]::HasPropertyValue(
+            $FilePath,
+            [Guid]$key.Fmtid,
+            [uint32]$key.Pid,
+            [ref]$hasValue
+        )
 
-    $indexMap = Get-ShellPropertyIndexMap -Folder $folder
+        if ($hr -eq 0) {
+            $checkedCount++
+            if ($hasValue) {
+                $residual.Add($key.Name)
+            }
 
-    $result = @{}
-    foreach ($propertyName in $sensitiveShellProperties) {
-        if (-not $indexMap.ContainsKey($propertyName)) {
             continue
         }
 
-        $value = $folder.GetDetailsOf($item, [int]$indexMap[$propertyName])
-        if ([string]::IsNullOrWhiteSpace($value)) {
+        if (Test-IsUnsupportedPropertyKeyHRESULT -HResult $hr) {
+            $unsupportedCount++
             continue
         }
 
-        $result[$propertyName] = $value.Trim()
+        $errors.Add(('{0} (HRESULT 0x{1:X8})' -f $key.Name, $hr))
     }
 
-    return $result
+    if ($errors.Count -gt 0) {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $false
+            Status         = 'Failed'
+            ResidualFields = @()
+            Message        = ('Property-key verification failed for: {0}' -f ($errors -join ', '))
+        }
+    }
+
+    if ($checkedCount -eq 0) {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $false
+            Status         = 'Unsupported'
+            ResidualFields = @()
+            Message        = ('Verification unsupported: no stable property keys were readable for this file. {0} keys were unavailable.' -f $unsupportedCount)
+        }
+    }
+
+    $residualFields = @($residual | Sort-Object -Unique)
+    if ($residualFields.Count -eq 0) {
+        return [pscustomobject]@{
+            Attempted      = $true
+            Succeeded      = $true
+            Status         = 'VerifiedClean'
+            ResidualFields = @()
+            Message        = ('No residual sensitive metadata values found across {0} stable property keys.' -f $checkedCount)
+        }
+    }
+
+    return [pscustomobject]@{
+        Attempted      = $true
+        Succeeded      = $false
+        Status         = 'ResidualFieldsFound'
+        ResidualFields = $residualFields
+        Message        = ('Residual sensitive property values found: {0}' -f ($residualFields -join ', '))
+    }
 }
 
 function Invoke-MediaMetadataScrub {
@@ -627,15 +720,11 @@ foreach ($file in $files) {
             }
         }
         else {
-            # Shell-property verification remains a secondary/fallback check for non-media files.
-            $residualProperties = Get-SensitiveShellProperties -FilePath $destination
-            if ($residualProperties.Count -eq 0) {
-                $fileResult.VerificationStatus = 'VerifiedClean'
-            }
-            else {
-                $fileResult.VerificationStatus = 'ResidualFieldsFound'
-                $fileResult.ResidualFields = @($residualProperties.Keys | Sort-Object)
-                $fileResult.Warnings.Add(('Residual sensitive properties found: {0}' -f ($fileResult.ResidualFields -join ', ')))
+            $nonMediaVerification = Invoke-PropertyKeyVerification -FilePath $destination
+            $fileResult.VerificationStatus = $nonMediaVerification.Status
+            if (-not $nonMediaVerification.Succeeded) {
+                $fileResult.ResidualFields = @($nonMediaVerification.ResidualFields)
+                $fileResult.Warnings.Add($nonMediaVerification.Message)
             }
         }
 
