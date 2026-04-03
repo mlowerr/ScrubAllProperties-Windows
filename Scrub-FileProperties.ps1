@@ -253,14 +253,20 @@ function Get-SensitivePropertyKeyDefinitions {
         [pscustomobject]@{ Name = 'System.Author'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 4 },
         [pscustomobject]@{ Name = 'System.Keywords'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 5 },
         [pscustomobject]@{ Name = 'System.Comment'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 6 },
+        [pscustomobject]@{ Name = 'System.Document.Manager'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 14 },
+        [pscustomobject]@{ Name = 'System.Company'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 15 },
         [pscustomobject]@{ Name = 'System.Rating'; Fmtid = '9a9bc088-4f6d-469e-9919-e705412040f9'; Pid = 9 },
+        [pscustomobject]@{ Name = 'System.Category'; Fmtid = 'd5cdd502-2e9c-101b-9397-08002b2cf9ae'; Pid = 2 },
         [pscustomobject]@{ Name = 'System.Copyright'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 11 },
+        [pscustomobject]@{ Name = 'System.Owner'; Fmtid = '9b174b34-40ff-11d2-a27e-00c04fc30871'; Pid = 4 },
+        [pscustomobject]@{ Name = 'System.People'; Fmtid = 'e8309b6e-084c-49b4-b1fc-90a80331b638'; Pid = 100 },
+        [pscustomobject]@{ Name = 'System.Music.Artist'; Fmtid = '56a3372e-ce9c-11d2-9f0e-006097c686f6'; Pid = 2 },
+        [pscustomobject]@{ Name = 'System.Media.Publisher'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 30 },
         [pscustomobject]@{ Name = 'System.Photo.DateTaken'; Fmtid = '14b81da1-0135-4d31-96d9-6cbfc9671a99'; Pid = 36867 },
         [pscustomobject]@{ Name = 'System.Photo.CameraManufacturer'; Fmtid = 'aabaf6c9-e0c5-4719-8585-57b103e584fe'; Pid = 100 },
         [pscustomobject]@{ Name = 'System.Photo.CameraModel'; Fmtid = '656a3bb3-ecc0-43fd-8477-4ae0404a96cd'; Pid = 272 },
         [pscustomobject]@{ Name = 'System.GPS.Latitude'; Fmtid = '8727cfff-4868-4ec6-ad5b-81b98521d1ab'; Pid = 100 },
-        [pscustomobject]@{ Name = 'System.GPS.Longitude'; Fmtid = 'c4c4dbb2-b593-466b-bbda-d03d27d5e43a'; Pid = 100 },
-        [pscustomobject]@{ Name = 'System.Media.Publisher'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 30 }
+        [pscustomobject]@{ Name = 'System.GPS.Longitude'; Fmtid = 'c4c4dbb2-b593-466b-bbda-d03d27d5e43a'; Pid = 100 }
     )
 }
 
@@ -275,7 +281,6 @@ function Test-IsUnsupportedPropertyKeyHRESULT {
     return @(
         0x80070490, # ERROR_NOT_FOUND
         0x80004002, # E_NOINTERFACE
-        0x80004005, # E_FAIL
         0x80070032  # ERROR_NOT_SUPPORTED
     ) -contains $HResult
 }
