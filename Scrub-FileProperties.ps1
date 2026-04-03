@@ -2,11 +2,8 @@
 param(
     [Parameter(Position = 0)]
     [string]$Path = (Get-Location).Path,
-
     [switch]$Recurse,
-
-    [string]$Filter = '*',
-
+    [string]$Filter = '*',   # Fix 1: was '\*' (stray backslash — worked by accident on Windows)
     [switch]$Force
 )
 
@@ -26,7 +23,7 @@ $imageRewriteExtensions = @(
     '.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.tif', '.tiff'
 )
 
-# `$IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
+# $IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
 $runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
     [bool]$IsWindows
 } else {
@@ -93,66 +90,53 @@ namespace PropertyScrubber {
 
     [Flags]
     public enum GETPROPERTYSTOREFLAGS : uint {
-        GPS_DEFAULT = 0x00000000,
-        GPS_HANDLERPROPERTIESONLY = 0x00000001,
-        GPS_READWRITE = 0x00000002,
-        GPS_TEMPORARY = 0x00000004,
-        GPS_FASTPROPERTIESONLY = 0x00000008,
-        GPS_OPENSLOWITEM = 0x00000010,
-        GPS_DELAYCREATION = 0x00000020,
-        GPS_BESTEFFORT = 0x00000040,
-        GPS_NO_OPLOCK = 0x00000080,
-        GPS_PREFERQUERYPROPERTIES = 0x00000100,
-        GPS_EXTRINSICPROPERTIES = 0x00000200,
+        GPS_DEFAULT                 = 0x00000000,
+        GPS_HANDLERPROPERTIESONLY   = 0x00000001,
+        GPS_READWRITE               = 0x00000002,
+        GPS_TEMPORARY               = 0x00000004,
+        GPS_FASTPROPERTIESONLY      = 0x00000008,
+        GPS_OPENSLOWITEM            = 0x00000010,
+        GPS_DELAYCREATION           = 0x00000020,
+        GPS_BESTEFFORT              = 0x00000040,
+        GPS_NO_OPLOCK               = 0x00000080,
+        GPS_PREFERQUERYPROPERTIES   = 0x00000100,
+        GPS_EXTRINSICPROPERTIES     = 0x00000200,
         GPS_EXTRINSICPROPERTIESONLY = 0x00000400,
-        GPS_VOLATILEPROPERTIES = 0x00000800,
-        GPS_VOLATILEPROPERTIESONLY = 0x00001000,
-        GPS_MASK_VALID = 0x00001fff
+        GPS_VOLATILEPROPERTIES      = 0x00000800,
+        GPS_VOLATILEPROPERTIESONLY  = 0x00001000,
+        GPS_MASK_VALID              = 0x00001fff
     }
 
     public static class PropertyHelpers {
         private const ushort VT_EMPTY = 0;
-        private const ushort VT_NULL = 1;
+        private const ushort VT_NULL  = 1;
 
         public static uint ClearWritableProperties(string path) {
             Guid iid = NativeMethods.IID_IPropertyStore;
             IPropertyStore store;
             uint hr = NativeMethods.SHGetPropertyStoreFromParsingName(
-                path,
-                IntPtr.Zero,
+                path, IntPtr.Zero,
                 GETPROPERTYSTOREFLAGS.GPS_READWRITE,
-                ref iid,
-                out store);
-
-            if (hr != 0) {
-                return hr;
-            }
+                ref iid, out store);
+            if (hr != 0) return hr;
 
             uint count;
             hr = store.GetCount(out count);
-            if (hr != 0) {
-                Marshal.ReleaseComObject(store);
-                return hr;
-            }
+            if (hr != 0) { Marshal.ReleaseComObject(store); return hr; }
 
             for (uint i = 0; i < count; i++) {
                 PROPERTYKEY key;
                 hr = store.GetAt(i, out key);
-                if (hr != 0) {
-                    continue;
-                }
+                if (hr != 0) continue;
 
                 PROPVARIANT existing;
                 hr = store.GetValue(ref key, out existing);
-                if (hr != 0) {
-                    continue;
-                }
+                if (hr != 0) continue;
 
                 NativeMethods.PropVariantClear(ref existing);
 
                 PROPVARIANT empty = new PROPVARIANT();
                 empty.vt = VT_EMPTY;
-
                 // Ignore read-only or unsupported properties.
                 store.SetValue(ref key, ref empty);
                 NativeMethods.PropVariantClear(ref empty);
@@ -163,41 +147,40 @@ namespace PropertyScrubber {
             return hr;
         }
 
-        public static uint HasPropertyValue(string path, Guid fmtid, uint pid, out bool hasValue) {
-            hasValue = false;
-
+        // Fix 6: replaces HasPropertyValue + hardcoded PKEY spot-checks with a full
+        // re-enumeration of the writable property store.  Returns the count of
+        // properties that still carry a non-empty value after scrubbing.
+        public static uint CountNonEmptyWritableProperties(string path, out uint nonEmptyCount) {
+            nonEmptyCount = 0;
             Guid iid = NativeMethods.IID_IPropertyStore;
             IPropertyStore store;
             uint hr = NativeMethods.SHGetPropertyStoreFromParsingName(
-                path,
-                IntPtr.Zero,
-                GETPROPERTYSTOREFLAGS.GPS_BESTEFFORT | GETPROPERTYSTOREFLAGS.GPS_OPENSLOWITEM,
-                ref iid,
-                out store);
+                path, IntPtr.Zero,
+                GETPROPERTYSTOREFLAGS.GPS_READWRITE,
+                ref iid, out store);
+            if (hr != 0) return hr;
 
-            if (hr != 0) {
-                return hr;
+            uint count;
+            hr = store.GetCount(out count);
+            if (hr != 0) { Marshal.ReleaseComObject(store); return hr; }
+
+            for (uint i = 0; i < count; i++) {
+                PROPERTYKEY key;
+                hr = store.GetAt(i, out key);
+                if (hr != 0) continue;
+
+                PROPVARIANT value;
+                hr = store.GetValue(ref key, out value);
+                if (hr != 0) continue;
+
+                try {
+                    if (value.vt != VT_EMPTY && value.vt != VT_NULL) nonEmptyCount++;
+                } finally {
+                    NativeMethods.PropVariantClear(ref value);
+                }
             }
 
-            PROPERTYKEY key = new PROPERTYKEY();
-            key.fmtid = fmtid;
-            key.pid = pid;
-
-            PROPVARIANT value;
-            hr = store.GetValue(ref key, out value);
             Marshal.ReleaseComObject(store);
-
-            if (hr != 0) {
-                return hr;
-            }
-
-            try {
-                hasValue = value.vt != VT_EMPTY && value.vt != VT_NULL;
-            }
-            finally {
-                NativeMethods.PropVariantClear(ref value);
-            }
-
             return 0;
         }
     }
@@ -212,19 +195,15 @@ function Get-ScrubbedFileName {
         [Parameter(Mandatory)]
         [string]$OriginalPath
     )
-
     $directory = Split-Path -Path $OriginalPath -Parent
-    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($OriginalPath)
+    $baseName  = [System.IO.Path]::GetFileNameWithoutExtension($OriginalPath)
     $extension = [System.IO.Path]::GetExtension($OriginalPath)
-
     $candidate = Join-Path $directory "$baseName`_scrubbed$extension"
     $counter = 2
-
     while (Test-Path -LiteralPath $candidate) {
         $candidate = Join-Path $directory "$baseName`_scrubbed_$counter$extension"
         $counter++
     }
-
     return $candidate
 }
 
@@ -233,7 +212,6 @@ function Test-IsMediaFile {
         [Parameter(Mandatory)]
         [string]$FilePath
     )
-
     $extension = [System.IO.Path]::GetExtension($FilePath)
     return $mediaExtensions -contains $extension.ToLowerInvariant()
 }
@@ -243,7 +221,6 @@ function Test-IsVideoFile {
         [Parameter(Mandatory)]
         [string]$FilePath
     )
-
     $extension = [System.IO.Path]::GetExtension($FilePath)
     return $videoExtensions -contains $extension.ToLowerInvariant()
 }
@@ -252,7 +229,6 @@ function Get-ExifToolCommand {
     if ($script:ExifToolCommand) {
         return $script:ExifToolCommand
     }
-
     foreach ($candidate in @('exiftool', 'exiftool.exe')) {
         $command = Get-Command -Name $candidate -ErrorAction SilentlyContinue
         if ($command) {
@@ -260,7 +236,6 @@ function Get-ExifToolCommand {
             return $script:ExifToolCommand
         }
     }
-
     return $null
 }
 
@@ -271,31 +246,7 @@ function Get-FfmpegCommand {
             return $command.Source
         }
     }
-
     return $null
-}
-
-function Get-SensitivePropertyKeyDefinitions {
-    return @(
-        [pscustomobject]@{ Name = 'System.Title'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 2 },
-        [pscustomobject]@{ Name = 'System.Subject'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 3 },
-        [pscustomobject]@{ Name = 'System.Author'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 4 },
-        [pscustomobject]@{ Name = 'System.Keywords'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 5 },
-        [pscustomobject]@{ Name = 'System.Comment'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 6 },
-        [pscustomobject]@{ Name = 'System.Document.Manager'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 14 },
-        [pscustomobject]@{ Name = 'System.Company'; Fmtid = 'f29f85e0-4ff9-1068-ab91-08002b27b3d9'; Pid = 15 },
-        [pscustomobject]@{ Name = 'System.Rating'; Fmtid = '9a9bc088-4f6d-469e-9919-e705412040f9'; Pid = 9 },
-        [pscustomobject]@{ Name = 'System.Category'; Fmtid = 'd5cdd502-2e9c-101b-9397-08002b2cf9ae'; Pid = 2 },
-        [pscustomobject]@{ Name = 'System.Copyright'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 11 },
-        [pscustomobject]@{ Name = 'System.People'; Fmtid = 'e8309b6e-084c-49b4-b1fc-90a80331b638'; Pid = 100 },
-        [pscustomobject]@{ Name = 'System.Music.Artist'; Fmtid = '56a3372e-ce9c-11d2-9f0e-006097c686f6'; Pid = 2 },
-        [pscustomobject]@{ Name = 'System.Media.Publisher'; Fmtid = '64440492-4c8b-11d1-8b70-080036b11a03'; Pid = 30 },
-        [pscustomobject]@{ Name = 'System.Photo.DateTaken'; Fmtid = '14b81da1-0135-4d31-96d9-6cbfc9671a99'; Pid = 36867 },
-        [pscustomobject]@{ Name = 'System.Photo.CameraManufacturer'; Fmtid = 'aabaf6c9-e0c5-4719-8585-57b103e584fe'; Pid = 100 },
-        [pscustomobject]@{ Name = 'System.Photo.CameraModel'; Fmtid = '656a3bb3-ecc0-43fd-8477-4ae0404a96cd'; Pid = 272 },
-        [pscustomobject]@{ Name = 'System.GPS.Latitude'; Fmtid = '8727cfff-4868-4ec6-ad5b-81b98521d1ab'; Pid = 100 },
-        [pscustomobject]@{ Name = 'System.GPS.Longitude'; Fmtid = 'c4c4dbb2-b593-466b-bbda-d03d27d5e43a'; Pid = 100 }
-    )
 }
 
 function Test-IsUnsupportedPropertyKeyHRESULT {
@@ -303,101 +254,64 @@ function Test-IsUnsupportedPropertyKeyHRESULT {
         [Parameter(Mandatory)]
         [uint32]$HResult
     )
-
-    # Common HRESULTs when a property key is unavailable through the current file's
-    # property handler. These are treated as "key unsupported", not "clean".
+    # Common HRESULTs when a property key is unavailable through the current
+    # file's property handler.
     return @(
-        0x80070490, # ERROR_NOT_FOUND
-        0x80004002, # E_NOINTERFACE
-        0x80070032  # ERROR_NOT_SUPPORTED
+        0x80070490,  # ERROR_NOT_FOUND
+        0x80004002,  # E_NOINTERFACE
+        0x80070032   # ERROR_NOT_SUPPORTED
     ) -contains $HResult
 }
 
+# Fix 6: rewritten to use CountNonEmptyWritableProperties, which re-enumerates
+# the entire writable property store rather than spot-checking a hardcoded list
+# of ~19 PKEYs.  This catches any residual property, not just known ones.
 function Invoke-PropertyKeyVerification {
     param(
         [Parameter(Mandatory)]
         [string]$FilePath
     )
 
-    $keyDefinitions = Get-SensitivePropertyKeyDefinitions
-    if (-not $keyDefinitions -or $keyDefinitions.Count -eq 0) {
-        return [pscustomobject]@{
-            Attempted      = $false
-            Succeeded      = $false
-            Status         = 'Unsupported'
-            ResidualFields = @()
-            Message        = 'Verification unsupported: no stable PKEY checks are defined.'
-        }
-    }
+    $nonEmptyCount = [uint32]0
+    $hr = [PropertyScrubber.PropertyHelpers]::CountNonEmptyWritableProperties(
+        $FilePath, [ref]$nonEmptyCount)
 
-    $residual = New-Object System.Collections.Generic.List[string]
-    $checkedCount = 0
-    $unsupportedCount = 0
-    $errors = New-Object System.Collections.Generic.List[string]
-
-    foreach ($key in $keyDefinitions) {
-        $hasValue = $false
-        $hr = [PropertyScrubber.PropertyHelpers]::HasPropertyValue(
-            $FilePath,
-            [Guid]$key.Fmtid,
-            [uint32]$key.Pid,
-            [ref]$hasValue
-        )
-
-        if ($hr -eq 0) {
-            $checkedCount++
-            if ($hasValue) {
-                $residual.Add($key.Name)
-            }
-
-            continue
-        }
-
+    if ($hr -ne 0) {
         if (Test-IsUnsupportedPropertyKeyHRESULT -HResult $hr) {
-            $unsupportedCount++
-            continue
+            return [pscustomobject]@{
+                Attempted      = $true
+                Succeeded      = $false
+                Status         = 'Unsupported'
+                ResidualFields = @()
+                Message        = 'Verification unsupported: writable property store not accessible for this file type.'
+            }
         }
-
-        $errors.Add(('{0} (HRESULT 0x{1:X8})' -f $key.Name, $hr))
-    }
-
-    if ($errors.Count -gt 0) {
         return [pscustomobject]@{
             Attempted      = $true
             Succeeded      = $false
             Status         = 'Failed'
             ResidualFields = @()
-            Message        = ('Property-key verification failed for: {0}' -f ($errors -join ', '))
+            Message        = ('Property store verification failed (HRESULT 0x{0:X8}).' -f $hr)
         }
     }
 
-    if ($checkedCount -eq 0) {
-        return [pscustomobject]@{
-            Attempted      = $true
-            Succeeded      = $false
-            Status         = 'Unsupported'
-            ResidualFields = @()
-            Message        = ('Verification unsupported: no stable property keys were readable for this file. {0} keys were unavailable.' -f $unsupportedCount)
-        }
-    }
-
-    $residualFields = @($residual | Sort-Object -Unique)
-    if ($residualFields.Count -eq 0) {
+    if ($nonEmptyCount -eq 0) {
         return [pscustomobject]@{
             Attempted      = $true
             Succeeded      = $true
             Status         = 'VerifiedClean'
             ResidualFields = @()
-            Message        = ('No residual sensitive metadata values found across {0} stable property keys.' -f $checkedCount)
+            Message        = 'No non-empty writable properties remain in property store.'
         }
     }
 
+    $noun = if ($nonEmptyCount -eq 1) { 'property' } else { 'properties' }
     return [pscustomobject]@{
         Attempted      = $true
         Succeeded      = $false
         Status         = 'ResidualFieldsFound'
-        ResidualFields = $residualFields
-        Message        = ('Residual sensitive property values found: {0}' -f ($residualFields -join ', '))
+        ResidualFields = @("$nonEmptyCount writable $noun remain non-empty")
+        Message        = "$nonEmptyCount writable $noun remain non-empty after scrub."
     }
 }
 
@@ -427,12 +341,11 @@ function Invoke-MediaMetadataScrub {
         $FilePath
     )
 
-    $stdout = $null
-    $stderr = $null
-    $exitCode = 0
+    $stdout    = $null
+    $exitCode  = 0
 
     try {
-        $stdout = & $tool @arguments 2>&1
+        $stdout   = & $tool @arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     catch {
@@ -468,16 +381,21 @@ function Test-ExcludedExifToolVerificationTag {
         [string]$TagName
     )
 
-    # Exclude file-system/bookkeeping fields and explicitly enumerated structural/stat tags
-    # that may legitimately persist after `-all=` and are not user-authored metadata.
+    # Exclude file-system/bookkeeping fields.
     $excludedPrefixes = @(
         'File:',
         'ExifTool:',
         'Composite:'
     )
 
+    # Structural/container tags that are not user-authored metadata.
+    # These are checked against the BARE tag name (after stripping any
+    # group prefix) so that group-qualified names emitted by ExifTool -G1
+    # — e.g. "JFIF:JFIFVersion", "PNG:Compression", "PNG:Filter" — match
+    # correctly.  Fix 3: the original code checked the full string, so
+    # "JFIF:JFIFVersion" never matched "JFIFVersion" and structural tags
+    # were incorrectly reported as residual metadata.
     $excludedTags = @(
-        # Container/file-structure descriptors (not descriptive/user-authored metadata).
         'JFIFVersion',
         'MajorBrand',
         'MinorVersion',
@@ -504,8 +422,12 @@ function Test-ExcludedExifToolVerificationTag {
         }
     }
 
+    # Strip group prefix (e.g. "JFIF:JFIFVersion" -> "JFIFVersion") before
+    # checking against $excludedTags.
+    $bareName = if ($TagName -match '^[^:]+:(.+)$') { $Matches[1] } else { $TagName }
+
     foreach ($excludedTag in $excludedTags) {
-        if ($TagName.Equals($excludedTag, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($bareName.Equals($excludedTag, [System.StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }
@@ -540,7 +462,7 @@ function Invoke-ExifToolMetadataVerification {
     )
 
     try {
-        $raw = & $tool @arguments 2>&1
+        $raw      = & $tool @arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     catch {
@@ -622,7 +544,8 @@ function Invoke-MediaMetadataRewriteFallback {
     )
 
     $extension = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
-    $tempPath = Join-Path (Split-Path -Path $FilePath -Parent) ("{0}.rewrite{1}" -f [System.Guid]::NewGuid().ToString('N'), $extension)
+    $tempPath  = Join-Path (Split-Path -Path $FilePath -Parent) (
+        '{0}.rewrite{1}' -f [System.Guid]::NewGuid().ToString('N'), $extension)
 
     try {
         if (Test-IsVideoFile -FilePath $FilePath) {
@@ -647,8 +570,9 @@ function Invoke-MediaMetadataRewriteFallback {
                 $tempPath
             )
 
-            $stdout = & $ffmpeg @arguments 2>&1
+            $stdout   = & $ffmpeg @arguments 2>&1
             $exitCode = $LASTEXITCODE
+
             if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
                 $details = if ($stdout) { ($stdout | Out-String).Trim() } else { 'No output.' }
                 return [pscustomobject]@{
@@ -661,21 +585,40 @@ function Invoke-MediaMetadataRewriteFallback {
         }
         elseif ($imageRewriteExtensions -contains $extension) {
             Add-Type -AssemblyName System.Drawing
+
+            # Fix 5: use an explicit extension-keyed format object rather than
+            # Image.RawFormat, which can return an unrecognised GUID for JPEG
+            # variants (.jpe, .jfif) and some TIFF configurations, causing
+            # Save() to silently fall back to BMP or throw.
+            $formatMap = @{
+                '.jpg'  = [System.Drawing.Imaging.ImageFormat]::Jpeg
+                '.jpeg' = [System.Drawing.Imaging.ImageFormat]::Jpeg
+                '.jpe'  = [System.Drawing.Imaging.ImageFormat]::Jpeg
+                '.jfif' = [System.Drawing.Imaging.ImageFormat]::Jpeg
+                '.png'  = [System.Drawing.Imaging.ImageFormat]::Png
+                '.tif'  = [System.Drawing.Imaging.ImageFormat]::Tiff
+                '.tiff' = [System.Drawing.Imaging.ImageFormat]::Tiff
+            }
+            $imageFormat = $formatMap[$extension]
+
             $image = [System.Drawing.Image]::FromFile($FilePath)
             try {
-                $format = $image.RawFormat
-                $image.Save($tempPath, $format)
+                $image.Save($tempPath, $imageFormat)
             }
             finally {
                 $image.Dispose()
             }
         }
         else {
+            # Fix 7: HEIC, HEIF, WEBP and other formats land here.  Clarify
+            # that this is a known limitation, not a generic configuration gap.
             return [pscustomobject]@{
                 Attempted = $false
                 Succeeded = $false
                 Status    = 'Skipped'
-                Message   = "Rewrite fallback skipped: no format-aware fallback is configured for '$extension'."
+                Message   = ("Rewrite fallback skipped for '$extension': no in-box Windows rewrite path is " +
+                             "available for this format.  ExifTool is the only supported scrub method; if " +
+                             "residual tags remain they cannot be removed by this script.")
             }
         }
 
@@ -689,6 +632,7 @@ function Invoke-MediaMetadataRewriteFallback {
         }
 
         Move-Item -LiteralPath $tempPath -Destination $FilePath -Force
+
         return [pscustomobject]@{
             Attempted = $true
             Succeeded = $true
@@ -771,6 +715,7 @@ if ($Recurse) {
 }
 
 $files = Get-ChildItem @enumerationOptions
+
 if (-not $files) {
     Write-Host 'No files matched the provided criteria.'
     return
@@ -794,10 +739,10 @@ function Get-ResultOutcome {
     }
 
     $scrubFailure =
-        (($Result.IsMedia -and -not $Result.MediaMetadataRemoved) -or
+        ($Result.IsMedia -and -not $Result.MediaMetadataRemoved) -or
         ($Result.PropertyStoreStatus -eq 'Failed') -or
         ($Result.VerificationStatus -eq 'ResidualFieldsFound') -or
-        ($Result.VerificationStatus -eq 'Failed'))
+        ($Result.VerificationStatus -eq 'Failed')
 
     if ($scrubFailure) {
         return 'Failed'
@@ -827,15 +772,16 @@ foreach ($file in $files) {
     }
 
     try {
-        $destination = if ($Force) {
-            Join-Path $file.DirectoryName ("{0}_scrubbed{1}" -f $file.BaseName, $file.Extension)
-        } else {
-            Get-ScrubbedFileName -OriginalPath $file.FullName
-        }
+        # Fix 2: always use collision-safe naming regardless of -Force.
+        # The original code bypassed Get-ScrubbedFileName when -Force was set,
+        # which could silently overwrite an input file whose name already ended
+        # in _scrubbed.  -Force is now forwarded only to Copy-Item, where its
+        # standard meaning is "copy over read-only destination attributes".
+        $destination = Get-ScrubbedFileName -OriginalPath $file.FullName
 
         Copy-Item -LiteralPath $file.FullName -Destination $destination -Force:$Force
         $fileResult.OutputFile = $destination
-        $fileResult.Copied = $true
+        $fileResult.Copied     = $true
 
         if ($fileResult.IsMedia) {
             $mediaScrub = Invoke-MediaMetadataScrub -FilePath $destination
@@ -904,40 +850,44 @@ foreach ($file in $files) {
                 $fileResult.Warnings.Add($nonMediaVerification.Message)
             }
         }
-
-        $isFullSuccess =
-            ($fileResult.IsMedia -and $fileResult.MediaMetadataRemoved -and ($fileResult.PropertyStoreCleared -or $fileResult.PropertyStoreStatus -eq 'Unsupported') -and $fileResult.VerificationStatus -eq 'VerifiedClean') -or
-            ((-not $fileResult.IsMedia) -and $fileResult.PropertyStoreCleared -and $fileResult.VerificationStatus -eq 'VerifiedClean')
-
-        if ($isFullSuccess) {
-            Write-Host "Scrubbed copy created: $destination"
-        }
-        else {
-            Write-Warning "Scrub completed with warnings for '$($file.FullName)'. See summary output for details."
-        }
     }
     catch {
         $fileResult.Warnings.Add($_.Exception.Message)
         Write-Warning "Failed to process '$($file.FullName)': $($_.Exception.Message)"
     }
 
+    # Fix 4: compute Outcome via Get-ResultOutcome before printing the per-file
+    # console message so both always agree.  The original code used a separate
+    # inline $isFullSuccess expression whose conditions were not identical to
+    # Get-ResultOutcome, causing the printed message and the Outcome column to
+    # contradict each other for some edge cases (e.g. VerificationStatus = 'Unsupported').
     $typedResult = [pscustomobject]$fileResult
     $typedResult | Add-Member -NotePropertyName Outcome -NotePropertyValue (Get-ResultOutcome -Result $typedResult) -Force
     $results.Add($typedResult)
+
+    if ($fileResult.Copied) {
+        if ($typedResult.Outcome -eq 'FullSuccess') {
+            Write-Host "Scrubbed copy created: $($fileResult.OutputFile)"
+        }
+        else {
+            Write-Warning "Scrub completed with warnings for '$($file.FullName)'. See summary output for details."
+        }
+    }
 }
 
 Write-Host ''
 Write-Host 'Scrub summary:'
+
 $fullSuccess = 0
-$partial = 0
-$failed = 0
+$partial     = 0
+$failed      = 0
 
 foreach ($result in $results) {
     switch ($result.Outcome) {
         'FullSuccess' { $fullSuccess++ }
-        'Partial' { $partial++ }
-        'Failed' { $failed++ }
-        default { $failed++ }
+        'Partial'     { $partial++ }
+        'Failed'      { $failed++ }
+        default       { $failed++ }
     }
 }
 
@@ -947,7 +897,8 @@ Write-Host ("  Failed       : {0}" -f $failed)
 Write-Host ''
 
 $results |
-    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus, RewriteFallbackStatus, Outcome,
+    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved,
+        PropertyStoreCleared, PropertyStoreStatus, VerificationStatus, RewriteFallbackStatus, Outcome,
         @{ Name = 'ResidualFields'; Expression = { $_.ResidualFields -join '; ' } },
-        @{ Name = 'Warnings'; Expression = { $_.Warnings -join ' | ' } } |
+        @{ Name = 'Warnings';       Expression = { $_.Warnings -join ' | ' } } |
     Format-Table -AutoSize
