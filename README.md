@@ -22,7 +22,7 @@
 
 - The script only supports Windows.
 - Copies are created next to originals with `_scrubbed` suffix.
-- ExifTool is a required dependency when matched files include image/video formats; media metadata removal will fail without it.  (  winget install OliverBetz.ExifTool   to install.)
+- ExifTool is a required dependency when matched files include image/video formats; media metadata removal will fail without it.  (`winget install OliverBetz.ExifTool` to install.)
 - ExifTool verification intentionally ignores file/stat and bookkeeping fields (`SourceFile`, `File:*`, `ExifTool:*`, `Composite:*`) plus a small explicit set of structural container tags (for example dimensions/encoding/container brand markers) that are not user-authored metadata.
 - If ExifTool verification still reports residual metadata tags after the first scrub pass, the script attempts a format-aware fallback before declaring failure:
   - Video containers (`.mp4`, `.m4v`, `.mov`, `.avi`, `.mkv`, `.wmv`): remux with `ffmpeg` (`-map_metadata -1 -map_chapters -1 -c copy`) when available.
