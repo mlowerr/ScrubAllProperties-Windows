@@ -22,4 +22,5 @@
 
 - The script only supports Windows.
 - Copies are created next to originals with `_scrubbed` suffix.
+- ExifTool is a required dependency when matched files include image/video formats; media metadata removal will fail without it.
 - Some formats/properties may be read-only or unsupported by the property handler. In those cases the script keeps the copied file and logs a warning.
