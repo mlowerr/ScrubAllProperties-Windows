@@ -18,6 +18,14 @@ $mediaExtensions = @(
     '.mp4', '.m4v', '.mov', '.avi', '.mkv', '.wmv'
 )
 
+$videoExtensions = @(
+    '.mp4', '.m4v', '.mov', '.avi', '.mkv', '.wmv'
+)
+
+$imageRewriteExtensions = @(
+    '.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.tif', '.tiff'
+)
+
 # `$IsWindows exists in PowerShell 6+, but not in Windows PowerShell 5.1.
 $runningOnWindows = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
     [bool]$IsWindows
@@ -230,6 +238,16 @@ function Test-IsMediaFile {
     return $mediaExtensions -contains $extension.ToLowerInvariant()
 }
 
+function Test-IsVideoFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($FilePath)
+    return $videoExtensions -contains $extension.ToLowerInvariant()
+}
+
 function Get-ExifToolCommand {
     if ($script:ExifToolCommand) {
         return $script:ExifToolCommand
@@ -240,6 +258,17 @@ function Get-ExifToolCommand {
         if ($command) {
             $script:ExifToolCommand = $command.Source
             return $script:ExifToolCommand
+        }
+    }
+
+    return $null
+}
+
+function Get-FfmpegCommand {
+    foreach ($candidate in @('ffmpeg', 'ffmpeg.exe')) {
+        $command = Get-Command -Name $candidate -ErrorAction SilentlyContinue
+        if ($command) {
+            return $command.Source
         }
     }
 
@@ -586,6 +615,102 @@ function Invoke-ExifToolMetadataVerification {
     }
 }
 
+function Invoke-MediaMetadataRewriteFallback {
+    param(
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLowerInvariant()
+    $tempPath = Join-Path (Split-Path -Path $FilePath -Parent) ("{0}.rewrite{1}" -f [System.Guid]::NewGuid().ToString('N'), $extension)
+
+    try {
+        if (Test-IsVideoFile -FilePath $FilePath) {
+            $ffmpeg = Get-FfmpegCommand
+            if (-not $ffmpeg) {
+                return [pscustomobject]@{
+                    Attempted = $false
+                    Succeeded = $false
+                    Status    = 'Skipped'
+                    Message   = 'Remux fallback skipped: ffmpeg was not found in PATH.'
+                }
+            }
+
+            $arguments = @(
+                '-y',
+                '-i', $FilePath,
+                '-map', '0',
+                '-map_metadata', '-1',
+                '-map_chapters', '-1',
+                '-dn',
+                '-c', 'copy',
+                $tempPath
+            )
+
+            $stdout = & $ffmpeg @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0 -or -not (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
+                $details = if ($stdout) { ($stdout | Out-String).Trim() } else { 'No output.' }
+                return [pscustomobject]@{
+                    Attempted = $true
+                    Succeeded = $false
+                    Status    = 'Failed'
+                    Message   = "Video remux fallback failed (exit code $exitCode). $details"
+                }
+            }
+        }
+        elseif ($imageRewriteExtensions -contains $extension) {
+            Add-Type -AssemblyName System.Drawing
+            $image = [System.Drawing.Image]::FromFile($FilePath)
+            try {
+                $format = $image.RawFormat
+                $image.Save($tempPath, $format)
+            }
+            finally {
+                $image.Dispose()
+            }
+        }
+        else {
+            return [pscustomobject]@{
+                Attempted = $false
+                Succeeded = $false
+                Status    = 'Skipped'
+                Message   = "Rewrite fallback skipped: no format-aware fallback is configured for '$extension'."
+            }
+        }
+
+        if (-not (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Succeeded = $false
+                Status    = 'Failed'
+                Message   = 'Rewrite/remux fallback did not produce an output file.'
+            }
+        }
+
+        Move-Item -LiteralPath $tempPath -Destination $FilePath -Force
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $true
+            Status    = 'Succeeded'
+            Message   = 'Format-aware rewrite/remux fallback completed.'
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Attempted = $true
+            Succeeded = $false
+            Status    = 'Failed'
+            Message   = "Rewrite/remux fallback failed: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath -PathType Leaf) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-PropertyStoreScrub {
     param(
         [Parameter(Mandatory)]
@@ -695,6 +820,7 @@ foreach ($file in $files) {
         PropertyStoreCleared  = $false
         PropertyStoreStatus   = 'NotAttempted'
         VerificationStatus    = 'NotChecked'
+        RewriteFallbackStatus = 'NotAttempted'
         Outcome               = 'NotProcessed'
         ResidualFields        = @()
         Warnings              = New-Object System.Collections.Generic.List[string]
@@ -738,7 +864,34 @@ foreach ($file in $files) {
         if ($fileResult.IsMedia) {
             $mediaVerification = Invoke-ExifToolMetadataVerification -FilePath $destination
             $fileResult.VerificationStatus = $mediaVerification.Status
-            if (-not $mediaVerification.Succeeded) {
+
+            if ($mediaVerification.Status -eq 'ResidualFieldsFound') {
+                $firstPassResidualFields = @($mediaVerification.ResidualFields)
+                $fileResult.Warnings.Add(('First-pass residual metadata tags: {0}' -f ($firstPassResidualFields -join ', ')))
+
+                $rewriteFallback = Invoke-MediaMetadataRewriteFallback -FilePath $destination
+                $fileResult.RewriteFallbackStatus = $rewriteFallback.Status
+                $fileResult.Warnings.Add($rewriteFallback.Message)
+
+                if ($rewriteFallback.Succeeded) {
+                    $secondPassVerification = Invoke-ExifToolMetadataVerification -FilePath $destination
+                    $fileResult.VerificationStatus = $secondPassVerification.Status
+
+                    if ($secondPassVerification.Status -eq 'ResidualFieldsFound') {
+                        $secondPassResidualFields = @($secondPassVerification.ResidualFields)
+                        $fileResult.ResidualFields = $secondPassResidualFields
+                        $fileResult.Warnings.Add(('Second-pass residual metadata tags after fallback: {0}' -f ($secondPassResidualFields -join ', ')))
+                    }
+                    elseif (-not $secondPassVerification.Succeeded) {
+                        $fileResult.ResidualFields = @($secondPassVerification.ResidualFields)
+                        $fileResult.Warnings.Add($secondPassVerification.Message)
+                    }
+                }
+                else {
+                    $fileResult.ResidualFields = $firstPassResidualFields
+                }
+            }
+            elseif (-not $mediaVerification.Succeeded) {
                 $fileResult.ResidualFields = @($mediaVerification.ResidualFields)
                 $fileResult.Warnings.Add($mediaVerification.Message)
             }
@@ -794,7 +947,7 @@ Write-Host ("  Failed       : {0}" -f $failed)
 Write-Host ''
 
 $results |
-    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus, Outcome,
+    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus, RewriteFallbackStatus, Outcome,
         @{ Name = 'ResidualFields'; Expression = { $_.ResidualFields -join '; ' } },
         @{ Name = 'Warnings'; Expression = { $_.Warnings -join ' | ' } } |
     Format-Table -AutoSize
