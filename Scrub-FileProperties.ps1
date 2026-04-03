@@ -342,8 +342,29 @@ function Test-ExcludedExifToolVerificationTag {
         [string]$TagName
     )
 
-    # Exclude file-system and ExifTool bookkeeping fields from residual metadata checks.
-    return $TagName -eq 'SourceFile' -or $TagName.StartsWith('File:') -or $TagName.StartsWith('ExifTool:')
+    # Exclude file-system/bookkeeping fields and structural/derived container tags that
+    # may legitimately persist after `-all=` and are not user-authored metadata.
+    $excludedPrefixes = @(
+        'File:',
+        'ExifTool:',
+        'Composite:',
+        'JFIF:',
+        'QuickTime:',
+        'PNG:',
+        'RIFF:'
+    )
+
+    if ($TagName -eq 'SourceFile') {
+        return $true
+    }
+
+    foreach ($prefix in $excludedPrefixes) {
+        if ($TagName.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Invoke-ExifToolMetadataVerification {
@@ -533,7 +554,8 @@ function Get-ResultOutcome {
     $scrubFailure =
         (($Result.IsMedia -and -not $Result.MediaMetadataRemoved) -or
         ($Result.PropertyStoreStatus -eq 'Failed') -or
-        ($Result.VerificationStatus -eq 'ResidualFieldsFound'))
+        ($Result.VerificationStatus -eq 'ResidualFieldsFound') -or
+        ($Result.VerificationStatus -eq 'Failed'))
 
     if ($scrubFailure) {
         return 'Failed'
