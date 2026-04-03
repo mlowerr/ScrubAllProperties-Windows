@@ -403,6 +403,32 @@ if (-not $files) {
 
 $results = New-Object System.Collections.Generic.List[object]
 
+function Get-ResultOutcome {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$Result
+    )
+
+    if (-not $Result.Copied) {
+        return 'Failed'
+    }
+
+    $scrubFailure =
+        (($Result.IsMedia -and -not $Result.MediaMetadataRemoved) -or
+        ($Result.PropertyStoreStatus -eq 'Failed') -or
+        ($Result.VerificationStatus -eq 'ResidualFieldsFound'))
+
+    if ($scrubFailure) {
+        return 'Failed'
+    }
+
+    if ($Result.Warnings.Count -gt 0) {
+        return 'Partial'
+    }
+
+    return 'FullSuccess'
+}
+
 foreach ($file in $files) {
     $fileResult = [ordered]@{
         SourceFile            = $file.FullName
@@ -413,6 +439,7 @@ foreach ($file in $files) {
         PropertyStoreCleared  = $false
         PropertyStoreStatus   = 'NotAttempted'
         VerificationStatus    = 'NotChecked'
+        Outcome               = 'NotProcessed'
         ResidualFields        = @()
         Warnings              = New-Object System.Collections.Generic.List[string]
     }
@@ -478,7 +505,9 @@ foreach ($file in $files) {
         Write-Warning "Failed to process '$($file.FullName)': $($_.Exception.Message)"
     }
 
-    $results.Add([pscustomobject]$fileResult)
+    $typedResult = [pscustomobject]$fileResult
+    $typedResult | Add-Member -NotePropertyName Outcome -NotePropertyValue (Get-ResultOutcome -Result $typedResult) -Force
+    $results.Add($typedResult)
 }
 
 Write-Host ''
@@ -488,19 +517,11 @@ $partial = 0
 $failed = 0
 
 foreach ($result in $results) {
-    $failedCopy = -not $result.Copied
-    $hasWarnings = $result.Warnings.Count -gt 0
-
-    if ($failedCopy) {
-        $failed++
-        continue
-    }
-
-    if (-not $hasWarnings) {
-        $fullSuccess++
-    }
-    else {
-        $partial++
+    switch ($result.Outcome) {
+        'FullSuccess' { $fullSuccess++ }
+        'Partial' { $partial++ }
+        'Failed' { $failed++ }
+        default { $failed++ }
     }
 }
 
@@ -510,7 +531,7 @@ Write-Host ("  Failed       : {0}" -f $failed)
 Write-Host ''
 
 $results |
-    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus,
+    Select-Object SourceFile, OutputFile, Copied, IsMedia, MediaMetadataRemoved, PropertyStoreCleared, PropertyStoreStatus, VerificationStatus, Outcome,
         @{ Name = 'ResidualFields'; Expression = { $_.ResidualFields -join '; ' } },
         @{ Name = 'Warnings'; Expression = { $_.Warnings -join ' | ' } } |
     Format-Table -AutoSize
